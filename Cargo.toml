@@ -1,0 +1,46 @@
+[package]
+name = "ringcast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+crossbeam-channel = "0.5"
+flume = "0.11"
+rtrb = "0.3"
+bus = "2.4"
+
+[[bench]]
+name = "baseline_pingpong"
+harness = false
+
+[[bench]]
+name = "latency_single"
+harness = false
+
+[[bench]]
+name = "throughput_single"
+harness = false
+
+[[bench]]
+name = "latency_cross_core"
+harness = false
+
+[[bench]]
+name = "cmp_spsc_throughput"
+harness = false
+
+[[bench]]
+name = "cmp_spsc_latency"
+harness = false
+
+[[bench]]
+name = "cmp_fanout_throughput"
+harness = false
+
+[[bench]]
+name = "cmp_try_recv"
+harness = false
