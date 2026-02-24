@@ -10,7 +10,7 @@ struct LargeStruct {
 
 #[test]
 fn large_send_recv_single() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     let item = LargeStruct {
         a: 1,
         b: 2,
@@ -23,7 +23,7 @@ fn large_send_recv_single() {
 
 #[test]
 fn large_send_recv_multiple() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(8);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(8);
     for i in 0..5u64 {
         tx.send(LargeStruct {
             a: i,
@@ -46,13 +46,13 @@ fn large_send_recv_multiple() {
 
 #[test]
 fn large_empty() {
-    let (_tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (_tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     assert_eq!(rx.try_recv(), Err(RecvError::Empty));
 }
 
 #[test]
 fn large_overrun() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     for i in 0..8u64 {
         tx.send(LargeStruct {
             a: i,
@@ -76,7 +76,7 @@ fn large_overrun() {
 
 #[test]
 fn large_subscribe() {
-    let (tx, mut rx1) = ringcast::large::bounded::<LargeStruct>(8);
+    let (tx, mut rx1) = ringcast::bounded::<LargeStruct>(8);
     tx.send(LargeStruct {
         a: 1,
         b: 0,
@@ -102,7 +102,7 @@ fn large_subscribe() {
 
 #[test]
 fn large_batch_send_recv() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(16);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(16);
     let items: Vec<LargeStruct> = (0..5)
         .map(|i| LargeStruct {
             a: i,
@@ -132,7 +132,7 @@ fn large_batch_send_recv() {
 
 #[test]
 fn large_available() {
-    let (tx, rx) = ringcast::large::bounded::<LargeStruct>(8);
+    let (tx, rx) = ringcast::bounded::<LargeStruct>(8);
     assert_eq!(rx.available(), 0);
     tx.send(LargeStruct {
         a: 1,
@@ -151,7 +151,7 @@ fn large_available() {
 
 #[test]
 fn large_check_overrun() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     for i in 0..8u64 {
         tx.send(LargeStruct {
             a: i,
@@ -169,7 +169,7 @@ fn large_check_overrun() {
 fn large_concurrent_correctness() {
     use std::thread;
 
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4096);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4096);
     let n = 10_000u64;
 
     let handle = thread::spawn(move || {
@@ -208,7 +208,7 @@ fn large_concurrent_correctness() {
 
 #[test]
 fn large_recv_timeout() {
-    let (tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     tx.send(LargeStruct {
         a: 42,
         b: 0,
@@ -222,7 +222,7 @@ fn large_recv_timeout() {
 
 #[test]
 fn large_recv_timeout_expires() {
-    let (_tx, mut rx) = ringcast::large::bounded::<LargeStruct>(4);
+    let (_tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     let result = rx.recv_timeout(std::time::Duration::from_millis(1));
     assert_eq!(result, Err(RecvError::Timeout));
 }

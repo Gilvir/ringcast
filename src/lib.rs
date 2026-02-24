@@ -1,7 +1,6 @@
 pub mod alloc;
 mod builder;
 mod hint;
-pub mod large;
 mod receiver;
 mod ring;
 mod sender;
@@ -18,6 +17,11 @@ pub use sender::Sender;
 ///
 /// Capacity is rounded up to the next power of two. Uses `HugePageAllocator`
 /// by default.
+///
+/// For `size_of::<T>() <= 8`, data slots use naturally atomic reads/writes.
+/// For larger types, per-slot sequence counters provide tear detection with
+/// ~5-10ns additional latency per operation. The path is selected at compile
+/// time — zero overhead for small types.
 ///
 /// # Panics
 /// Panics if `capacity` is 0.

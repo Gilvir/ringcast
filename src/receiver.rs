@@ -59,9 +59,11 @@ impl<T: Copy> Receiver<T> {
     /// # State machine (from design §5):
     /// 1. Load `r_top` (Acquire) FIRST
     /// 2. Load `w_top` (Acquire) SECOND
-    /// 3. Check overrun: `w_top - local_pos > capacity` → snap forward, return `Overrun`
-    /// 4. Check empty: `local_pos >= r_top` → return `Empty`
+    /// 3. Check overrun: `w_top - local_pos > capacity` -> snap forward, return `Overrun`
+    /// 4. Check empty: `local_pos >= r_top` -> return `Empty`
     /// 5. Read slot, advance position, return `Ok(item)`
+    ///
+    /// For large types, a tear during read is treated as `Empty` (retry later).
     #[inline]
     pub fn try_recv(&mut self) -> Result<T, RecvError> {
         // MUST load r_top before w_top — see design §5 load ordering rationale
@@ -85,9 +87,19 @@ impl<T: Copy> Receiver<T> {
         }
 
         // Read the slot and advance
-        let item = unsafe { std::ptr::read(self.ring.slot_ptr(local_pos)) };
-        self.local_position = local_pos.wrapping_add(1);
-        Ok(item)
+        unsafe {
+            match self.ring.read_item(local_pos) {
+                Some(item) => {
+                    self.local_position = local_pos.wrapping_add(1);
+                    Ok(item)
+                }
+                None => {
+                    // Tear detected — the sender is currently writing this slot.
+                    // Treat as if the data is not yet available.
+                    Err(RecvError::Empty)
+                }
+            }
+        }
     }
 
     /// Blocking receive. Spins until data is available using tiered backoff.
@@ -158,6 +170,9 @@ impl<T: Copy> Receiver<T> {
 
     /// Non-blocking batch receive. Fills buffer with available items.
     /// Returns `Ok(count)` or `Err(RecvError::Overrun)` if lapped.
+    ///
+    /// For small types: reads all available items with prefetch (no tears possible).
+    /// For large types: reads until a tear is detected, then stops.
     #[inline]
     pub fn try_recv_batch(&mut self, buf: &mut [T]) -> Result<usize, RecvError> {
         if buf.is_empty() {
@@ -187,21 +202,41 @@ impl<T: Copy> Receiver<T> {
         let available = r_top.wrapping_sub(local_pos) as usize;
         let count = available.min(buf.len());
 
-        for i in 0..count {
-            unsafe {
-                let pos = local_pos.wrapping_add(i as u64);
-                // Prefetch next slot
-                if i + 1 < count {
-                    crate::hint::prefetch_read(
-                        self.ring.slot_ptr(pos.wrapping_add(1)) as *const T,
-                    );
+        if const { std::mem::size_of::<T>() <= 8 } {
+            // Small path: no tears possible, read with prefetch
+            for i in 0..count {
+                unsafe {
+                    let pos = local_pos.wrapping_add(i as u64);
+                    // Prefetch next slot
+                    if i + 1 < count {
+                        crate::hint::prefetch_read(
+                            self.ring.slot_ptr_raw(pos.wrapping_add(1)),
+                        );
+                    }
+                    // Safety: small T always returns Some
+                    buf[i] = self.ring.read_item(pos).unwrap_unchecked();
                 }
-                buf[i] = std::ptr::read(self.ring.slot_ptr(pos));
             }
+            self.local_position = local_pos.wrapping_add(count as u64);
+            Ok(count)
+        } else {
+            // Large path: stop on tear
+            let mut actual = 0;
+            for i in 0..count {
+                let pos = local_pos.wrapping_add(i as u64);
+                unsafe {
+                    match self.ring.read_item(pos) {
+                        Some(item) => {
+                            buf[actual] = item;
+                            actual += 1;
+                        }
+                        None => break, // Tear — stop batch here
+                    }
+                }
+            }
+            self.local_position = local_pos.wrapping_add(actual as u64);
+            Ok(actual)
         }
-
-        self.local_position = local_pos.wrapping_add(count as u64);
-        Ok(count)
     }
 
     /// Blocking batch receive. Spins until at least one item is available,

@@ -38,7 +38,7 @@ impl<T: Copy> Sender<T> {
     /// Two-phase publish protocol (design §4):
     /// 1. `w_top.load(Relaxed)` — read current position (sender-local)
     /// 2. `w_top.store(pos + 1, Relaxed)` — advance write head
-    /// 3. `ptr::write(slot, item)` — write data
+    /// 3. `write_item(pos, item)` — write data (bare write or seqlock)
     /// 4. `r_top.store(pos + 1, Release)` — publish to receivers
     #[inline(always)]
     pub fn send(&self, item: T) {
@@ -46,7 +46,7 @@ impl<T: Copy> Sender<T> {
         self.ring.w_top().store(pos.wrapping_add(1), Ordering::Relaxed);
 
         unsafe {
-            std::ptr::write(self.ring.slot_ptr(pos), item);
+            self.ring.write_item(pos, item);
         }
 
         self.ring.r_top().store(pos.wrapping_add(1), Ordering::Release);
@@ -55,7 +55,8 @@ impl<T: Copy> Sender<T> {
     /// Send a batch of items. Returns the number of items sent (always == items.len()).
     ///
     /// Amortizes the atomic `r_top` publish across N items.
-    /// Manually unrolled for N <= 4.
+    /// For small types: manually unrolled for N <= 4, prefetch loop for N >= 5.
+    /// For large types: simple loop (seqlock per-write makes unrolling less beneficial).
     #[inline]
     pub fn send_batch(&self, items: &[T]) -> usize {
         let n = items.len();
@@ -68,36 +69,44 @@ impl<T: Copy> Sender<T> {
             .w_top()
             .store(start.wrapping_add(n as u64), Ordering::Relaxed);
 
-        unsafe {
-            match n {
-                1 => {
-                    std::ptr::write(self.ring.slot_ptr(start), items[0]);
-                }
-                2 => {
-                    std::ptr::write(self.ring.slot_ptr(start), items[0]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(1)), items[1]);
-                }
-                3 => {
-                    std::ptr::write(self.ring.slot_ptr(start), items[0]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(1)), items[1]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(2)), items[2]);
-                }
-                4 => {
-                    std::ptr::write(self.ring.slot_ptr(start), items[0]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(1)), items[1]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(2)), items[2]);
-                    std::ptr::write(self.ring.slot_ptr(start.wrapping_add(3)), items[3]);
-                }
-                _ => {
-                    for i in 0..n {
-                        let pos = start.wrapping_add(i as u64);
-                        if i + 1 < n {
-                            crate::hint::prefetch_read(
-                                self.ring.slot_ptr(pos.wrapping_add(1)) as *const T,
-                            );
-                        }
-                        std::ptr::write(self.ring.slot_ptr(pos), items[i]);
+        if const { std::mem::size_of::<T>() <= 8 } {
+            unsafe {
+                match n {
+                    1 => {
+                        self.ring.write_item(start, items[0]);
                     }
+                    2 => {
+                        self.ring.write_item(start, items[0]);
+                        self.ring.write_item(start.wrapping_add(1), items[1]);
+                    }
+                    3 => {
+                        self.ring.write_item(start, items[0]);
+                        self.ring.write_item(start.wrapping_add(1), items[1]);
+                        self.ring.write_item(start.wrapping_add(2), items[2]);
+                    }
+                    4 => {
+                        self.ring.write_item(start, items[0]);
+                        self.ring.write_item(start.wrapping_add(1), items[1]);
+                        self.ring.write_item(start.wrapping_add(2), items[2]);
+                        self.ring.write_item(start.wrapping_add(3), items[3]);
+                    }
+                    _ => {
+                        for i in 0..n {
+                            let pos = start.wrapping_add(i as u64);
+                            if i + 1 < n {
+                                crate::hint::prefetch_read(
+                                    self.ring.slot_ptr_raw(pos.wrapping_add(1)),
+                                );
+                            }
+                            self.ring.write_item(pos, items[i]);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (i, item) in items.iter().enumerate() {
+                unsafe {
+                    self.ring.write_item(start.wrapping_add(i as u64), *item);
                 }
             }
         }
