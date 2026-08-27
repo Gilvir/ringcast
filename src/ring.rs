@@ -1,8 +1,39 @@
 use std::alloc::Layout;
+use std::cell::UnsafeCell;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::Allocator;
+
+/// Per-slot layout for types larger than 8 bytes, with seqlock tear detection.
+///
+/// ```text
+/// +----------+--------------------+----------+
+/// | seq_pre  |       data: T      | seq_post |
+/// | (u64)    |                    | (u64)    |
+/// +----------+--------------------+----------+
+/// ```
+///
+/// The sender stores the logical write position into `seq_pre` (Release) before
+/// touching `data`, and into `seq_post` (Release) afterwards. A reader that sees
+/// `seq_pre == seq_post == position` is guaranteed a clean copy: any concurrent
+/// or lapping write leaves the two counters unequal or advanced past `position`.
+#[repr(C)]
+pub(crate) struct Slot<T> {
+    seq_pre: AtomicU64,
+    data: UnsafeCell<T>,
+    seq_post: AtomicU64,
+}
+
+impl<T: Copy> Slot<T> {
+    fn init() -> Self {
+        Self {
+            seq_pre: AtomicU64::new(u64::MAX),
+            data: UnsafeCell::new(unsafe { std::mem::zeroed() }),
+            seq_post: AtomicU64::new(u64::MAX),
+        }
+    }
+}
 
 /// Core ring buffer shared between sender and receivers via `Arc`.
 ///
@@ -11,9 +42,15 @@ use crate::alloc::Allocator;
 /// - Line 2 (64-127): w_top (sender writes, receiver reads for overrun)
 /// - Line 3 (128-191): r_top (sender writes to publish, receiver polls)
 ///
-/// Overwrite detection relies on the w_top pre/post bracket in the receiver:
-/// a torn read requires the sender to lap the receiver (advancing w_top by
-/// >= capacity), which the bracket catches for all type sizes.
+/// Overwrite detection is size-dependent:
+/// - `size_of::<T>() <= 8`: slots are bare `T` (naturally atomic, no tearing).
+///   A torn/stale read requires the sender to lap the receiver, which the
+///   `w_top` pre/post bracket in the receiver catches.
+/// - `size_of::<T>() > 8`: slots are `Slot<T>` with per-slot seqlock counters.
+///   The seqlock gives a proper release/acquire edge per slot, so concurrent
+///   and lapping writes are detected without relying on `w_top` store ordering.
+///
+/// The path is selected at compile time via `const { size_of::<T>() <= 8 }`.
 #[repr(C, align(64))]
 pub struct RingBuf<T: Copy> {
     data_ptr: *mut u8,
@@ -27,6 +64,8 @@ pub struct RingBuf<T: Copy> {
     r_top: AtomicU64,
     _pad2: [u8; 56],
 
+    layout: Layout,
+    alloc: Box<dyn Allocator>,
     _marker: PhantomData<T>,
 }
 
@@ -43,12 +82,28 @@ impl<T: Copy> RingBuf<T> {
         let capacity = capacity.next_power_of_two();
         let mask = (capacity as u64).wrapping_sub(1);
 
-        let layout = Layout::array::<T>(capacity).expect("ringcast: layout overflow");
-        let data_ptr = alloc.alloc(layout);
-        assert!(
-            !data_ptr.is_null(),
-            "ringcast: allocation failed for {capacity} elements",
-        );
+        let (data_ptr, layout) = if const { std::mem::size_of::<T>() <= 8 } {
+            let layout = Layout::array::<T>(capacity).expect("ringcast: layout overflow");
+            let data_ptr = alloc.alloc(layout);
+            assert!(
+                !data_ptr.is_null(),
+                "ringcast: allocation failed for {capacity} elements",
+            );
+            (data_ptr, layout)
+        } else {
+            let layout = Layout::array::<Slot<T>>(capacity).expect("ringcast: layout overflow");
+            let data_ptr = alloc.alloc(layout);
+            assert!(
+                !data_ptr.is_null(),
+                "ringcast: allocation failed for {capacity} slots",
+            );
+            for i in 0..capacity {
+                unsafe {
+                    std::ptr::write((data_ptr as *mut Slot<T>).add(i), Slot::init());
+                }
+            }
+            (data_ptr, layout)
+        };
 
         Self {
             data_ptr,
@@ -59,6 +114,8 @@ impl<T: Copy> RingBuf<T> {
             _pad1: [0; 56],
             r_top: AtomicU64::new(0),
             _pad2: [0; 56],
+            layout,
+            alloc,
             _marker: PhantomData,
         }
     }
@@ -88,26 +145,76 @@ impl<T: Copy> RingBuf<T> {
         self.data_ptr
     }
 
+    /// Write an item to the ring at the given position.
+    ///
+    /// For small types (`size_of::<T>() <= 8`): bare `ptr::write` (naturally atomic).
+    /// For large types: seqlock protocol (`seq_pre` -> write -> `seq_post`).
     #[inline(always)]
     pub unsafe fn write_item(&self, position: u64, item: T) {
         let idx = (position & self.mask) as usize;
-        unsafe {
-            std::ptr::write((self.data_ptr as *mut T).add(idx), item);
+        if const { std::mem::size_of::<T>() <= 8 } {
+            unsafe {
+                std::ptr::write((self.data_ptr as *mut T).add(idx), item);
+            }
+        } else {
+            unsafe {
+                let slot = &*(self.data_ptr as *const Slot<T>).add(idx);
+                slot.seq_pre.store(position, Ordering::Release);
+                // Ensure the seq_pre store is visible before the data write.
+                std::sync::atomic::fence(Ordering::Release);
+                std::ptr::write(slot.data.get(), item);
+                slot.seq_post.store(position, Ordering::Release);
+            }
         }
     }
 
+    /// Read an item from the ring at the given position.
+    ///
+    /// For small types (`size_of::<T>() <= 8`): bare `ptr::read`, always `Some`.
+    /// For large types: seqlock read with tear detection. Returns `None` if the
+    /// slot is being written or has been lapped past `position`.
     #[inline(always)]
     #[allow(dead_code)]
-    pub unsafe fn read_item(&self, position: u64) -> T {
+    pub unsafe fn read_item(&self, position: u64) -> Option<T> {
         let idx = (position & self.mask) as usize;
-        unsafe { std::ptr::read((self.data_ptr as *const T).add(idx)) }
+        if const { std::mem::size_of::<T>() <= 8 } {
+            Some(unsafe { std::ptr::read((self.data_ptr as *const T).add(idx)) })
+        } else {
+            unsafe {
+                let slot = &*(self.data_ptr as *const Slot<T>).add(idx);
+                let pre = slot.seq_pre.load(Ordering::Acquire);
+                let item = std::ptr::read(slot.data.get());
+                // Ensure the data read is ordered before the seq_post load.
+                std::sync::atomic::fence(Ordering::Acquire);
+                let post = slot.seq_post.load(Ordering::Acquire);
+                if pre == post && pre == position {
+                    Some(item)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
-    /// For prefetch hints.
+    /// Raw pointer to the slot at the given position, for prefetch hints.
     #[inline(always)]
     pub unsafe fn slot_ptr_raw(&self, position: u64) -> *const u8 {
         let idx = (position & self.mask) as usize;
-        unsafe { (self.data_ptr as *const T).add(idx) as *const u8 }
+        if const { std::mem::size_of::<T>() <= 8 } {
+            unsafe { (self.data_ptr as *const T).add(idx) as *const u8 }
+        } else {
+            unsafe { (self.data_ptr as *const Slot<T>).add(idx) as *const u8 }
+        }
+    }
+}
+
+impl<T: Copy> Drop for RingBuf<T> {
+    fn drop(&mut self) {
+        // T: Copy, and Slot<T> holds only atomics + Copy data, so no element
+        // drops are required — just release the backing allocation.
+        unsafe {
+            self.alloc.dealloc(self.data_ptr, self.layout);
+        }
     }
 }
 
@@ -146,5 +253,25 @@ mod tests {
         let ring = RingBuf::<u64>::new(1, Box::new(crate::alloc::HugePageAllocator::new()));
         assert_eq!(ring.capacity(), 1);
         assert_eq!(ring.mask(), 0);
+    }
+
+    #[test]
+    fn test_large_type_seqlock_roundtrip() {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        struct Big {
+            a: u64,
+            b: u64,
+            c: u64,
+        }
+        let ring = RingBuf::<Big>::new(4, Box::new(crate::alloc::HugePageAllocator::new()));
+        let v = Big { a: 1, b: 2, c: 3 };
+        unsafe {
+            assert_eq!(ring.read_item(0), None);
+            ring.write_item(0, v);
+            assert_eq!(ring.read_item(0), Some(v));
+            // Lapping write to the same physical slot is detected as stale.
+            ring.write_item(4, Big { a: 9, b: 9, c: 9 });
+            assert_eq!(ring.read_item(0), None);
+        }
     }
 }

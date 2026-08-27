@@ -11,13 +11,12 @@ use crate::ring::RingBuf;
 ///
 /// Hot fields are cached on cache line 1 to eliminate pointer indirection
 /// through `Arc<RingBuf<T>>` on the fast path.
-#[repr(C)]
+#[repr(C, align(64))]
 pub struct Sender<T: Copy> {
     // Cache line 1: hot
     w_top_ptr: *const AtomicU64,
     r_top_ptr: *const AtomicU64,
-    mask: u64,
-    _pad_hot: [u8; 40],
+    _pad_hot: [u8; 48],
     // Cache line 2: cold
     ring: Arc<RingBuf<T>>,
     spin_iterations: usize,
@@ -34,13 +33,11 @@ impl<T: Copy> Sender<T> {
         // which is held in the same struct.
         let w_top_ptr: *const AtomicU64 = ring.w_top();
         let r_top_ptr: *const AtomicU64 = ring.r_top();
-        let mask = ring.mask();
 
         Self {
             w_top_ptr,
             r_top_ptr,
-            mask,
-            _pad_hot: [0; 40],
+            _pad_hot: [0; 48],
             ring,
             spin_iterations,
             allow_yield,
@@ -141,5 +138,16 @@ impl<T: Copy> Sender<T> {
             self.spin_iterations,
             self.allow_yield,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_line_is_cache_aligned() {
+        assert_eq!(align_of::<Sender<u64>>() % 64, 0);
+        assert_eq!(align_of::<Sender<[u8; 128]>>() % 64, 0);
     }
 }

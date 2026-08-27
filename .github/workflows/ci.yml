@@ -11,7 +11,12 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Include an AArch64 runner: the large-type seqlock and the small-type
+        # w_top bracket have weak-memory behaviour that x86-TSO cannot exercise.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -81,7 +81,10 @@ const CORE_PAIRS: &[(&str, usize, usize)] = &[
 ];
 
 fn pin_to_core(core_id: usize) {
-    core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
+    assert!(
+        core_affinity::set_for_current(core_affinity::CoreId { id: core_id }),
+        "failed to pin to core {core_id}",
+    );
 }
 
 #[repr(align(64))]

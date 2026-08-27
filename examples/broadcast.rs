@@ -1,7 +1,9 @@
 //! Multi-consumer broadcast with overrun handling.
 //!
-//! A producer thread sends a stream of ticks. Three receiver threads consume
-//! them — one is deliberately slow so it triggers overrun detection.
+//! A producer thread blasts out more ticks than the ring can hold. Three
+//! receiver threads consume them; any receiver that falls outside the
+//! capacity-sized window is lapped and reports `RecvError::Overrun` with the
+//! number of ticks it missed. The deliberately-slow receiver is lapped the most.
 
 use std::thread;
 use std::time::Duration;
@@ -11,8 +13,9 @@ use ringcast::RecvError;
 const TICK_COUNT: u64 = 500;
 
 fn main() {
-    // Small capacity so the slow receiver gets lapped.
-    let (tx, mut rx_fast1) = ringcast::bounded::<u64>(450);
+    // Capacity (256) < TICK_COUNT (500), so a receiver that falls behind the
+    // 256-tick window is lapped.
+    let (tx, mut rx_fast1) = ringcast::bounded::<u64>(256);
     let mut rx_fast2 = tx.subscribe();
     let mut rx_slow = tx.subscribe();
 

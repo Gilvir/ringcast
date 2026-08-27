@@ -25,7 +25,7 @@ pub enum RecvError {
 ///
 /// Hot fields are cached on cache line 1 to eliminate pointer indirection
 /// through `Arc<RingBuf<T>>` on the fast path.
-#[repr(C)]
+#[repr(C, align(64))]
 pub struct Receiver<T: Copy> {
     // Cache line 1: hot (accessed every try_recv)
     local_position: u64,
@@ -99,9 +99,19 @@ impl<T: Copy> Receiver<T> {
             return Err(RecvError::Empty);
         }
 
-        // Read directly from cached data_ptr (no indirection through ring)
-        let idx = (local_pos & self.mask) as usize;
-        let item = unsafe { std::ptr::read((self.data_ptr as *const T).add(idx)) };
+        let item = if const { std::mem::size_of::<T>() <= 8 } {
+            // Small types are naturally atomic: read directly from the cached
+            // data pointer, then re-check w_top below to catch a lapping write.
+            let idx = (local_pos & self.mask) as usize;
+            unsafe { std::ptr::read((self.data_ptr as *const T).add(idx)) }
+        } else {
+            // Large types use the per-slot seqlock in the ring: a concurrent or
+            // lapping write is reported as `None` and retried by the caller.
+            match unsafe { self.ring.read_item(local_pos) } {
+                Some(item) => item,
+                None => return Err(RecvError::Empty),
+            }
+        };
 
         // Post-read validation: re-check w_top to detect if the sender overwrote
         // our slot between the pre-read check and the actual read. Without this,
@@ -235,8 +245,14 @@ impl<T: Copy> Receiver<T> {
         }
     }
 
-    /// Non-blocking batch receive. Fills buffer with available items.
-    /// Returns `Ok(count)` or `Err(RecvError::Overrun)` if lapped.
+    /// Non-blocking batch receive. Fills `buf` with as many available items as fit.
+    ///
+    /// Returns:
+    /// - `Ok(count)` — number of items written to `buf`. `count > 0`, except
+    ///   `Ok(0)` when `buf` itself is empty.
+    /// - `Err(RecvError::Empty)` — no data currently available in the channel.
+    /// - `Err(RecvError::Overrun { lost })` — the receiver was lapped; it has
+    ///   been repositioned to the oldest surviving item.
     #[inline]
     pub fn try_recv_batch(&mut self, buf: &mut [T]) -> Result<usize, RecvError> {
         if buf.is_empty() {
@@ -262,19 +278,42 @@ impl<T: Copy> Receiver<T> {
         let available = r_top.wrapping_sub(local_pos) as usize;
         let count = available.min(buf.len());
 
-        let base = self.data_ptr as *const T;
-        let mask = self.mask;
-        for (i, slot) in buf[..count].iter_mut().enumerate() {
-            unsafe {
-                let pos = local_pos.wrapping_add(i as u64);
-                // Prefetch next slot
-                if i + 1 < count {
-                    let next_idx = (pos.wrapping_add(1) & mask) as usize;
-                    crate::hint::prefetch_read(base.add(next_idx));
+        let read = if const { std::mem::size_of::<T>() <= 8 } {
+            let base = self.data_ptr as *const T;
+            let mask = self.mask;
+            for (i, slot) in buf[..count].iter_mut().enumerate() {
+                unsafe {
+                    let pos = local_pos.wrapping_add(i as u64);
+                    // Prefetch next slot
+                    if i + 1 < count {
+                        let next_idx = (pos.wrapping_add(1) & mask) as usize;
+                        crate::hint::prefetch_read(base.add(next_idx));
+                    }
+                    let idx = (pos & mask) as usize;
+                    *slot = std::ptr::read(base.add(idx));
                 }
-                let idx = (pos & mask) as usize;
-                *slot = std::ptr::read(base.add(idx));
             }
+            count
+        } else {
+            // Large types: seqlock read per slot, stop at the first slot that is
+            // being written or has been lapped.
+            let mut actual = 0usize;
+            for slot in buf[..count].iter_mut() {
+                let pos = local_pos.wrapping_add(actual as u64);
+                match unsafe { self.ring.read_item(pos) } {
+                    Some(item) => {
+                        *slot = item;
+                        actual += 1;
+                    }
+                    None => break,
+                }
+            }
+            actual
+        };
+
+        if read == 0 {
+            // Large-type seqlock reported the first slot as busy/lapped.
+            return Err(RecvError::Empty);
         }
 
         // Post-read validation: re-check w_top to detect if the sender
@@ -286,8 +325,8 @@ impl<T: Copy> Receiver<T> {
             self.local_position = new_pos;
             return Err(RecvError::Overrun { lost });
         }
-        self.local_position = local_pos.wrapping_add(count as u64);
-        Ok(count)
+        self.local_position = local_pos.wrapping_add(read as u64);
+        Ok(read)
     }
 
     /// Blocking batch receive. Spins until at least one item is available,
@@ -347,5 +386,16 @@ impl<T: Copy> Receiver<T> {
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hot_line_is_cache_aligned() {
+        assert_eq!(std::mem::align_of::<Receiver<u64>>() % 64, 0);
+        assert_eq!(std::mem::align_of::<Receiver<[u8; 128]>>() % 64, 0);
     }
 }

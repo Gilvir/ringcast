@@ -46,9 +46,17 @@ pub unsafe fn prefetch_read<T>(ptr: *const T) {
 
 #[inline(always)]
 pub unsafe fn prefetch_write(ptr: *const u8) {
-    #[cfg(target_arch = "x86_64")]
+    // `prefetchw` is only guaranteed decodable when the target enables the
+    // `prfchw` feature (Broadwell+/AMD). Without it, fall back to a plain
+    // `PREFETCHT0`, which LLVM lowers safely on every x86_64 CPU — matching the
+    // behaviour of `prefetch_read`.
+    #[cfg(all(target_arch = "x86_64", target_feature = "prfchw"))]
     unsafe {
         core::arch::asm!("prefetchw [{}]", in(reg) ptr, options(nostack, preserves_flags));
+    }
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "prfchw")))]
+    unsafe {
+        core::arch::x86_64::_mm_prefetch(ptr as *const i8, core::arch::x86_64::_MM_HINT_T0);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {

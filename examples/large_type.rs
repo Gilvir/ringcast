@@ -1,7 +1,7 @@
 //! Broadcasting a large struct across threads.
 //!
-//! Demonstrates that ringcast works with types larger than 8 bytes
-//! using the same w_top bracket for overwrite detection.
+//! Demonstrates that ringcast works with types larger than 8 bytes, which use
+//! per-slot seqlock counters for tear/overwrite detection.
 
 use std::thread;
 use std::time::Duration;
