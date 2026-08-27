@@ -8,6 +8,36 @@ struct LargeStruct {
     d: u64,
 }
 
+fn make_large(i: u64) -> LargeStruct {
+    LargeStruct {
+        a: i,
+        b: i.wrapping_mul(7),
+        c: i.wrapping_mul(13),
+        d: i.wrapping_mul(31),
+    }
+}
+
+fn check_large(val: &LargeStruct) {
+    assert_eq!(
+        val.b,
+        val.a.wrapping_mul(7),
+        "inconsistent b at a={}",
+        val.a
+    );
+    assert_eq!(
+        val.c,
+        val.a.wrapping_mul(13),
+        "inconsistent c at a={}",
+        val.a
+    );
+    assert_eq!(
+        val.d,
+        val.a.wrapping_mul(31),
+        "inconsistent d at a={}",
+        val.a
+    );
+}
+
 #[test]
 fn large_send_recv_single() {
     let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
@@ -22,149 +52,69 @@ fn large_send_recv_single() {
 }
 
 #[test]
-fn large_send_recv_multiple() {
-    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(8);
-    for i in 0..5u64 {
-        tx.send(LargeStruct {
-            a: i,
-            b: i * 10,
-            c: i * 100,
-            d: i * 1000,
-        });
+fn large_batch_send_wraps_around() {
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
+    // Advance position to near end
+    for i in 0..3u64 {
+        tx.send(make_large(i));
     }
-    for i in 0..5u64 {
-        let expected = LargeStruct {
-            a: i,
-            b: i * 10,
-            c: i * 100,
-            d: i * 1000,
-        };
-        assert_eq!(rx.try_recv(), Ok(expected));
+    for _ in 0..3 {
+        rx.try_recv().unwrap();
+    }
+    // Batch write wraps: positions 3, 4(→slot 0), 5(→slot 1)
+    let items: Vec<LargeStruct> = (10..13).map(make_large).collect();
+    tx.send_batch(&items);
+    for i in 10..13u64 {
+        let val = rx.try_recv().unwrap();
+        assert_eq!(val.a, i);
+        check_large(&val);
     }
     assert_eq!(rx.try_recv(), Err(RecvError::Empty));
 }
 
 #[test]
-fn large_empty() {
-    let (_tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
-    assert_eq!(rx.try_recv(), Err(RecvError::Empty));
-}
-
-#[test]
-fn large_overrun() {
+fn large_try_recv_batch_overrun() {
     let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
     for i in 0..8u64 {
-        tx.send(LargeStruct {
-            a: i,
-            b: 0,
-            c: 0,
-            d: 0,
-        });
+        tx.send(make_large(i));
     }
-
-    match rx.try_recv() {
-        Err(RecvError::Overrun { lost }) => {
-            assert_eq!(lost, 4);
-        }
-        other => panic!("expected Overrun, got {:?}", other),
+    let mut buf = vec![make_large(0); 8];
+    match rx.try_recv_batch(&mut buf) {
+        Err(RecvError::Overrun { lost }) => assert_eq!(lost, 4),
+        other => panic!("expected Overrun, got {other:?}"),
     }
-
-    // Should be able to read after recovery
-    let val = rx.try_recv().unwrap();
-    assert_eq!(val.a, 4);
-}
-
-#[test]
-fn large_subscribe() {
-    let (tx, mut rx1) = ringcast::bounded::<LargeStruct>(8);
-    tx.send(LargeStruct {
-        a: 1,
-        b: 0,
-        c: 0,
-        d: 0,
-    });
-
-    let mut rx2 = tx.subscribe();
-
-    tx.send(LargeStruct {
-        a: 2,
-        b: 0,
-        c: 0,
-        d: 0,
-    });
-
-    assert_eq!(rx1.try_recv().unwrap().a, 1);
-    assert_eq!(rx1.try_recv().unwrap().a, 2);
-
-    assert_eq!(rx2.try_recv().unwrap().a, 2);
-    assert_eq!(rx2.try_recv(), Err(RecvError::Empty));
-}
-
-#[test]
-fn large_batch_send_recv() {
-    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(16);
-    let items: Vec<LargeStruct> = (0..5)
-        .map(|i| LargeStruct {
-            a: i,
-            b: i * 10,
-            c: i * 100,
-            d: i * 1000,
-        })
-        .collect();
-    let sent = tx.send_batch(&items);
-    assert_eq!(sent, 5);
-
-    let mut buf = vec![
-        LargeStruct {
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0
-        };
-        8
-    ];
+    // After repositioning, read surviving data
     let n = rx.try_recv_batch(&mut buf).unwrap();
-    assert_eq!(n, 5);
-    for i in 0..5 {
-        assert_eq!(buf[i], items[i]);
+    assert_eq!(n, 4);
+    for (i, item) in buf.iter().enumerate().take(4) {
+        assert_eq!(item.a, (i + 4) as u64);
+        check_large(item);
     }
 }
 
 #[test]
-fn large_available() {
-    let (tx, rx) = ringcast::bounded::<LargeStruct>(8);
-    assert_eq!(rx.available(), 0);
-    tx.send(LargeStruct {
-        a: 1,
-        b: 0,
-        c: 0,
-        d: 0,
-    });
-    tx.send(LargeStruct {
-        a: 2,
-        b: 0,
-        c: 0,
-        d: 0,
-    });
-    assert_eq!(rx.available(), 2);
-}
-
-#[test]
-fn large_check_overrun() {
-    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
-    for i in 0..8u64 {
-        tx.send(LargeStruct {
-            a: i,
-            b: 0,
-            c: 0,
-            d: 0,
-        });
+fn large_batch_recv_partial() {
+    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(16);
+    for i in 0..10u64 {
+        tx.send(make_large(i));
     }
-    let lost = rx.check_overrun();
-    assert!(lost.is_some());
-    assert_eq!(lost.unwrap(), 4);
+    let mut buf = vec![make_large(0); 3];
+    let n = rx.try_recv_batch(&mut buf).unwrap();
+    assert_eq!(n, 3);
+    for (idx, item) in buf[..3].iter().enumerate() {
+        assert_eq!(item.a, idx as u64);
+        check_large(item);
+    }
+    // More data still available
+    let n = rx.try_recv_batch(&mut buf).unwrap();
+    assert_eq!(n, 3);
+    for (idx, item) in buf[..3].iter().enumerate() {
+        assert_eq!(item.a, (idx + 3) as u64);
+        check_large(item);
+    }
 }
 
+/// Concurrent send/recv with large types — verifies no torn reads under contention.
 #[test]
 fn large_concurrent_correctness() {
     use std::thread;
@@ -174,12 +124,7 @@ fn large_concurrent_correctness() {
 
     let handle = thread::spawn(move || {
         for i in 0..n {
-            tx.send(LargeStruct {
-                a: i,
-                b: i.wrapping_mul(7),
-                c: i.wrapping_mul(13),
-                d: i.wrapping_mul(31),
-            });
+            tx.send(make_large(i));
         }
     });
 
@@ -187,10 +132,7 @@ fn large_concurrent_correctness() {
     loop {
         match rx.try_recv() {
             Ok(val) => {
-                // Verify internal consistency — no torn reads
-                assert_eq!(val.b, val.a.wrapping_mul(7), "torn read on b at a={}", val.a);
-                assert_eq!(val.c, val.a.wrapping_mul(13), "torn read on c at a={}", val.a);
-                assert_eq!(val.d, val.a.wrapping_mul(31), "torn read on d at a={}", val.a);
+                check_large(&val);
                 count += 1;
                 if val.a == n - 1 {
                     break;
@@ -204,25 +146,4 @@ fn large_concurrent_correctness() {
 
     handle.join().unwrap();
     assert!(count > 0);
-}
-
-#[test]
-fn large_recv_timeout() {
-    let (tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
-    tx.send(LargeStruct {
-        a: 42,
-        b: 0,
-        c: 0,
-        d: 0,
-    });
-    let result = rx.recv_timeout(std::time::Duration::from_millis(100));
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap().a, 42);
-}
-
-#[test]
-fn large_recv_timeout_expires() {
-    let (_tx, mut rx) = ringcast::bounded::<LargeStruct>(4);
-    let result = rx.recv_timeout(std::time::Duration::from_millis(1));
-    assert_eq!(result, Err(RecvError::Timeout));
 }

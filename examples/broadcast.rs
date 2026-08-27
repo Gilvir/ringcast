@@ -12,11 +12,10 @@ const TICK_COUNT: u64 = 500;
 
 fn main() {
     // Small capacity so the slow receiver gets lapped.
-    let (tx, mut rx_fast1) = ringcast::bounded::<u64>(500);
+    let (tx, mut rx_fast1) = ringcast::bounded::<u64>(450);
     let mut rx_fast2 = tx.subscribe();
     let mut rx_slow = tx.subscribe();
 
-    // --- producer ---
     let producer = thread::spawn(move || {
         for tick in 0..TICK_COUNT {
             tx.send(tick);
@@ -24,7 +23,6 @@ fn main() {
         println!("[producer] sent {TICK_COUNT} ticks");
     });
 
-    // --- fast receiver 1 ---
     let fast1 = thread::spawn(move || {
         let mut count = 0u64;
         loop {
@@ -40,7 +38,6 @@ fn main() {
         println!("[fast-1]  received {count}");
     });
 
-    // --- fast receiver 2 ---
     let fast2 = thread::spawn(move || {
         let mut count = 0u64;
         loop {
@@ -56,7 +53,6 @@ fn main() {
         println!("[fast-2]  received {count}");
     });
 
-    // --- slow receiver (will get lapped) ---
     let slow = thread::spawn(move || {
         let mut count = 0u64;
         let mut total_lost = 0usize;
@@ -66,7 +62,7 @@ fn main() {
                     count += 1;
                     // Simulate slow processing every 10 items.
                     if count % 10 == 0 {
-                        thread::sleep(Duration::from_micros(500));
+                        thread::sleep(Duration::from_micros(5000));
                     }
                 }
                 Err(RecvError::Overrun { lost }) => {

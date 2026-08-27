@@ -3,12 +3,10 @@
 fn main() {
     let (tx, mut rx) = ringcast::bounded::<u32>(16);
 
-    // Send a few items
     for i in 1..=5 {
         tx.send(i);
     }
 
-    // Receive them all
     loop {
         match rx.try_recv() {
             Ok(val) => println!("received: {val}"),

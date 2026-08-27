@@ -11,7 +11,6 @@ fn spsc_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc_throughput");
     group.measurement_time(Duration::from_secs(5));
 
-    // --- ringcast ---
     group.bench_function("ringcast", |b| {
         let (tx, mut rx) = ringcast::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -37,7 +36,6 @@ fn spsc_throughput(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- crossbeam-channel ---
     group.bench_function("crossbeam", |b| {
         let (tx, rx) = crossbeam_channel::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -63,7 +61,6 @@ fn spsc_throughput(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- flume ---
     group.bench_function("flume", |b| {
         let (tx, rx) = flume::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -89,7 +86,6 @@ fn spsc_throughput(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- rtrb ---
     group.bench_function("rtrb", |b| {
         let (mut tx, mut rx) = rtrb::RingBuffer::<u64>::new(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -124,7 +120,6 @@ fn spsc_throughput_batch_16(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc_throughput_batch_16");
     group.measurement_time(Duration::from_secs(5));
 
-    // --- ringcast (native send_batch) ---
     group.bench_function("ringcast", |b| {
         let (tx, mut rx) = ringcast::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -151,7 +146,6 @@ fn spsc_throughput_batch_16(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- crossbeam (loop 16 individual sends) ---
     group.bench_function("crossbeam", |b| {
         let (tx, rx) = crossbeam_channel::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -179,7 +173,6 @@ fn spsc_throughput_batch_16(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- flume (loop 16 individual sends) ---
     group.bench_function("flume", |b| {
         let (tx, rx) = flume::bounded::<u64>(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));
@@ -207,7 +200,6 @@ fn spsc_throughput_batch_16(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- rtrb (loop 16 individual pushes) ---
     group.bench_function("rtrb", |b| {
         let (mut tx, mut rx) = rtrb::RingBuffer::<u64>::new(CAPACITY);
         let running = Arc::new(AtomicBool::new(true));

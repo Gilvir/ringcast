@@ -2,6 +2,78 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+fn latency_send_recv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("latency");
+
+    group.bench_function("single_send_recv", |b| {
+        let (tx, mut rx) = ringcast::bounded::<u64>(4096);
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+
+        let handle = std::thread::spawn(move || {
+            let mut seq = 0u64;
+            while running_clone.load(Ordering::Relaxed) {
+                tx.send(seq);
+                seq = seq.wrapping_add(1);
+                std::hint::spin_loop();
+            }
+        });
+
+        b.iter(|| {
+            let val = rx.recv();
+            black_box(val);
+        });
+
+        running.store(false, Ordering::Relaxed);
+        handle.join().unwrap();
+    });
+
+    group.bench_function("try_recv_hit", |b| {
+        let (tx, mut rx) = ringcast::bounded::<u64>(4096);
+
+        for i in 0..100u64 {
+            tx.send(i);
+        }
+
+        b.iter(|| {
+            tx.send(black_box(42));
+            let val = rx.try_recv();
+            let _ = black_box(val);
+        });
+    });
+
+    group.bench_function("try_recv_miss", |b| {
+        let (_tx, mut rx) = ringcast::bounded::<u64>(4096);
+
+        b.iter(|| {
+            let val = rx.try_recv();
+            let _ = black_box(val);
+        });
+    });
+
+    group.finish();
+}
+
+fn latency_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_latency");
+
+    for batch_size in [1, 4, 16, 64] {
+        group.bench_function(format!("send_batch_{batch_size}"), |b| {
+            let (tx, mut rx) = ringcast::bounded::<u64>(4096);
+            let items: Vec<u64> = (0..batch_size).collect();
+            let mut buf = vec![0u64; batch_size as usize];
+
+            b.iter(|| {
+                tx.send_batch(black_box(&items));
+                let n = rx.try_recv_batch(&mut buf).unwrap();
+                black_box(n);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 const CORE_PAIRS: &[(&str, usize, usize)] = &[
     ("cores_0_1_sibling", 0, 1),
     ("cores_2_3_sibling", 2, 3),
@@ -9,15 +81,9 @@ const CORE_PAIRS: &[(&str, usize, usize)] = &[
 ];
 
 fn pin_to_core(core_id: usize) {
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(core_id, &mut set);
-        let ret = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        assert_eq!(ret, 0, "failed to pin to core {core_id}");
-    }
+    core_affinity::set_for_current(core_affinity::CoreId { id: core_id });
 }
 
-/// Cache-line-aligned atomic counter.
 #[repr(align(64))]
 struct CacheLine {
     val: AtomicU64,
@@ -85,8 +151,6 @@ fn cross_core_pingpong(c: &mut Criterion) {
 }
 
 /// ringcast send/recv (one-way) per core pair.
-/// Sender thread pinned to sender_core runs flat-out;
-/// receiver/bencher thread pinned to receiver_core calls rx.recv().
 fn cross_core_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("cross_core_latency");
 
@@ -121,5 +185,11 @@ fn cross_core_latency(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, cross_core_pingpong, cross_core_latency);
+criterion_group!(
+    benches,
+    latency_send_recv,
+    latency_batch,
+    cross_core_pingpong,
+    cross_core_latency
+);
 criterion_main!(benches);

@@ -6,6 +6,7 @@ use std::alloc::Layout;
 /// and correctly free it in `dealloc`. The returned pointer must be valid for
 /// the given layout.
 pub unsafe trait Allocator: Send + Sync {
+    /// Allocate memory for `layout`, returning a properly aligned, zeroed pointer.
     fn alloc(&self, layout: Layout) -> *mut u8;
 
     /// # Safety
@@ -14,9 +15,12 @@ pub unsafe trait Allocator: Send + Sync {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout);
 }
 
+/// Tries Linux huge pages first (falling back to regular `mmap`); on non-Linux
+/// platforms or under Miri, falls back to the system allocator.
 pub struct HugePageAllocator;
 
 impl HugePageAllocator {
+    /// Create a new `HugePageAllocator`.
     pub fn new() -> Self {
         HugePageAllocator
     }
@@ -28,10 +32,9 @@ impl Default for HugePageAllocator {
     }
 }
 
-#[cfg(not(miri))]
+#[cfg(all(target_os = "linux", not(miri)))]
 unsafe impl Allocator for HugePageAllocator {
     fn alloc(&self, layout: Layout) -> *mut u8 {
-        // Try huge pages first
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -76,7 +79,7 @@ unsafe impl Allocator for HugePageAllocator {
     }
 }
 
-#[cfg(miri)]
+#[cfg(any(miri, not(target_os = "linux")))]
 unsafe impl Allocator for HugePageAllocator {
     fn alloc(&self, layout: Layout) -> *mut u8 {
         unsafe { std::alloc::alloc_zeroed(layout) }

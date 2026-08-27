@@ -4,52 +4,9 @@ use std::sync::Arc;
 
 const CAPACITY: usize = 4096;
 
-fn spsc_latency(c: &mut Criterion) {
-    let mut group = c.benchmark_group("spsc_latency");
-
-    // --- ringcast ---
-    group.bench_function("ringcast", |b| {
-        let (tx, mut rx) = ringcast::bounded::<u64>(CAPACITY);
-        b.iter(|| {
-            tx.send(black_box(42u64));
-            black_box(rx.try_recv())
-        });
-    });
-
-    // --- crossbeam-channel ---
-    group.bench_function("crossbeam", |b| {
-        let (tx, rx) = crossbeam_channel::bounded::<u64>(CAPACITY);
-        b.iter(|| {
-            let _ = tx.try_send(black_box(42u64));
-            black_box(rx.try_recv())
-        });
-    });
-
-    // --- flume ---
-    group.bench_function("flume", |b| {
-        let (tx, rx) = flume::bounded::<u64>(CAPACITY);
-        b.iter(|| {
-            let _ = tx.try_send(black_box(42u64));
-            black_box(rx.try_recv())
-        });
-    });
-
-    // --- rtrb ---
-    group.bench_function("rtrb", |b| {
-        let (mut tx, mut rx) = rtrb::RingBuffer::<u64>::new(CAPACITY);
-        b.iter(|| {
-            let _ = tx.push(black_box(42u64));
-            black_box(rx.pop())
-        });
-    });
-
-    group.finish();
-}
-
 fn spsc_latency_cross_thread(c: &mut Criterion) {
     let mut group = c.benchmark_group("spsc_latency_cross_thread");
 
-    // --- ringcast ---
     group.bench_function("ringcast", |b| {
         let (tx, mut rx) = ringcast::bounded::<u64>(CAPACITY);
         let ack = Arc::new(AtomicU64::new(0));
@@ -78,11 +35,10 @@ fn spsc_latency_cross_thread(c: &mut Criterion) {
         });
 
         running.store(false, Ordering::Relaxed);
-        tx.send(0); // unblock receiver
+        tx.send(0);
         handle.join().unwrap();
     });
 
-    // --- crossbeam-channel ---
     group.bench_function("crossbeam", |b| {
         let (tx, rx) = crossbeam_channel::bounded::<u64>(CAPACITY);
         let ack = Arc::new(AtomicU64::new(0));
@@ -115,7 +71,6 @@ fn spsc_latency_cross_thread(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- flume ---
     group.bench_function("flume", |b| {
         let (tx, rx) = flume::bounded::<u64>(CAPACITY);
         let ack = Arc::new(AtomicU64::new(0));
@@ -148,7 +103,6 @@ fn spsc_latency_cross_thread(c: &mut Criterion) {
         handle.join().unwrap();
     });
 
-    // --- rtrb ---
     group.bench_function("rtrb", |b| {
         let (mut tx, mut rx) = rtrb::RingBuffer::<u64>::new(CAPACITY);
         let ack = Arc::new(AtomicU64::new(0));
@@ -186,5 +140,5 @@ fn spsc_latency_cross_thread(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, spsc_latency, spsc_latency_cross_thread);
+criterion_group!(benches, spsc_latency_cross_thread);
 criterion_main!(benches);

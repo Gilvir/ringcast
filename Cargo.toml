@@ -2,45 +2,32 @@
 name = "ringcast"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Lock-free SPMC broadcast ring buffer"
+license = "MIT OR Apache-2.0"
+keywords = ["lock-free", "broadcast", "ring-buffer", "spmc", "channel"]
+categories = ["concurrency", "data-structures"]
+readme = "README.md"
+exclude = ["benches/ringcast-bench", ".idea", ".claude"]
 
 [dependencies]
+mimalloc = { version = "0.1.48", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
+core_affinity = "0.8.3"
 criterion = { version = "0.5", features = ["html_reports"] }
-crossbeam-channel = "0.5"
-flume = "0.11"
-rtrb = "0.3"
-bus = "2.4"
+proptest = "1"
+
+[features]
+mimalloc = ["dep:mimalloc"]
 
 [[bench]]
-name = "baseline_pingpong"
+name = "latency"
 harness = false
 
 [[bench]]
-name = "latency_single"
-harness = false
-
-[[bench]]
-name = "throughput_single"
-harness = false
-
-[[bench]]
-name = "latency_cross_core"
-harness = false
-
-[[bench]]
-name = "cmp_spsc_throughput"
-harness = false
-
-[[bench]]
-name = "cmp_spsc_latency"
-harness = false
-
-[[bench]]
-name = "cmp_fanout_throughput"
-harness = false
-
-[[bench]]
-name = "cmp_try_recv"
+name = "throughput"
 harness = false

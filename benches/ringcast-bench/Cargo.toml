@@ -1,0 +1,29 @@
+[package]
+name = "ringcast-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ringcast = { path = "../.." }
+criterion = { version = "0.5", features = ["html_reports"] }
+crossbeam-channel = "0.5"
+flume = "0.11"
+rtrb = "0.3"
+bus = "2.4"
+
+[[bench]]
+name = "spsc_latency"
+harness = false
+
+[[bench]]
+name = "spsc_throughput"
+harness = false
+
+[[bench]]
+name = "fanout_throughput"
+harness = false
+
+[[bench]]
+name = "try_recv"
+harness = false

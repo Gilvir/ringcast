@@ -6,7 +6,6 @@ use crate::receiver::Receiver;
 use crate::ring::RingBuf;
 use crate::sender::Sender;
 
-/// Builder for configuring a ringcast channel.
 pub struct Builder<T: Copy> {
     capacity: Option<usize>,
     allocator: Option<Box<dyn Allocator>>,
