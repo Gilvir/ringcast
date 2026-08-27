@@ -1,9 +1,10 @@
 [package]
 name = "ringcast"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Lock-free SPMC broadcast ring buffer"
+repository = "https://github.com/gilvir/ringcast"
 license = "MIT OR Apache-2.0"
 keywords = ["lock-free", "broadcast", "ring-buffer", "spmc", "channel"]
 categories = ["concurrency", "data-structures"]
@@ -11,14 +12,14 @@ readme = "README.md"
 exclude = ["benches/ringcast-bench", ".idea", ".claude"]
 
 [dependencies]
-mimalloc = { version = "0.1.48", optional = true }
+mimalloc = { version = "0.1.52", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 core_affinity = "0.8.3"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1"
 
 [features]
