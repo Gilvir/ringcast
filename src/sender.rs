@@ -5,12 +5,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::receiver::Receiver;
 use crate::ring::RingBuf;
 
-/// Single-threaded sender. `!Clone`, `!Sync`, `Send`.
+/// Single-threaded sender. `!Clone`, `!Sync`, `Send` — moving it to a thread
+/// hands over exclusive ownership.
 ///
-/// Moving to a thread transfers exclusive ownership.
-///
-/// Hot fields are cached on cache line 1 to eliminate pointer indirection
-/// through `Arc<RingBuf<T>>` on the fast path.
+/// Hot fields sit on cache line 1 so the fast path skips the indirection through
+/// `Arc<RingBuf<T>>`.
 #[repr(C, align(64))]
 pub struct Sender<T: Copy> {
     // Cache line 1: hot
@@ -45,12 +44,10 @@ impl<T: Copy> Sender<T> {
         }
     }
 
-    /// Send a single item. Never blocks. Overwrites oldest slot if full.
+    /// Send a single item. Never blocks; overwrites the oldest slot when full.
     ///
-    /// Two-phase publish:
-    /// 1. Advance `w_top` (Relaxed) — reserves the slot
-    /// 2. Write data
-    /// 3. Advance `r_top` (Release) — makes it visible to receivers
+    /// Advance `w_top` (Relaxed) to claim the slot, write the data, then advance
+    /// `r_top` (Release) to publish it.
     #[inline(always)]
     pub fn send(&self, item: T) {
         let w_top = unsafe { &*self.w_top_ptr };
@@ -59,8 +56,7 @@ impl<T: Copy> Sender<T> {
         let pos = w_top.load(Ordering::Relaxed);
         w_top.store(pos.wrapping_add(1), Ordering::Relaxed);
 
-        // Prefetch next write slot for Modified MESI state while writing current slot.
-        // This overlaps the RFO (Read For Ownership) latency with the current write.
+        // Prefetch the next slot so its RFO overlaps the current write.
         unsafe {
             crate::hint::prefetch_write(self.ring.slot_ptr_raw(pos.wrapping_add(1)));
         }
@@ -72,10 +68,10 @@ impl<T: Copy> Sender<T> {
         r_top.store(pos.wrapping_add(1), Ordering::Release);
     }
 
-    /// Send a batch of items. Returns the number of items sent (always == items.len()).
+    /// Send a batch. Returns the count sent (always `items.len()`).
     ///
-    /// Amortizes the atomic `r_top` publish across N items.
-    /// Manually unrolled for N <= 4, prefetch loop for N >= 5.
+    /// One `r_top` publish for the whole batch. Unrolled for N <= 4, prefetch
+    /// loop above that.
     #[inline]
     pub fn send_batch(&self, items: &[T]) -> usize {
         let n = items.len();
@@ -128,8 +124,8 @@ impl<T: Copy> Sender<T> {
         n
     }
 
-    /// Create a new receiver positioned at the current write head.
-    /// The new receiver will see all items sent after this call.
+    /// New receiver positioned at the current write head. It sees everything
+    /// sent after this call.
     pub fn subscribe(&self) -> Receiver<T> {
         let pos = unsafe { &*self.w_top_ptr }.load(Ordering::Relaxed);
         Receiver::new(

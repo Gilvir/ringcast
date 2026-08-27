@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::Allocator;
 
-/// Per-slot layout for types larger than 8 bytes, with seqlock tear detection.
+/// Per-slot layout for types larger than 8 bytes. The seqlock counters catch
+/// torn and lapped reads.
 ///
 /// ```text
 /// +----------+--------------------+----------+
@@ -14,10 +15,9 @@ use crate::alloc::Allocator;
 /// +----------+--------------------+----------+
 /// ```
 ///
-/// The sender stores the logical write position into `seq_pre` (Release) before
-/// touching `data`, and into `seq_post` (Release) afterwards. A reader that sees
-/// `seq_pre == seq_post == position` is guaranteed a clean copy: any concurrent
-/// or lapping write leaves the two counters unequal or advanced past `position`.
+/// The sender writes the position into `seq_pre` before touching `data` and into
+/// `seq_post` after. A reader that sees `seq_pre == seq_post == position` has a
+/// clean copy; anything else means a write landed on the slot.
 #[repr(C)]
 pub(crate) struct Slot<T> {
     seq_pre: AtomicU64,
@@ -35,22 +35,18 @@ impl<T: Copy> Slot<T> {
     }
 }
 
-/// Core ring buffer shared between sender and receivers via `Arc`.
+/// Core ring buffer, shared between sender and receivers via `Arc`.
 ///
 /// Cache-line layout (64-byte alignment):
-/// - Line 1 (0-63):   data_ptr, capacity, mask, padding  (read-only after init)
-/// - Line 2 (64-127): w_top (sender writes, receiver reads for overrun)
+/// - Line 1 (0-63):    data_ptr, capacity, mask, padding (read-only after init)
+/// - Line 2 (64-127):  w_top (sender writes, receiver reads for overrun)
 /// - Line 3 (128-191): r_top (sender writes to publish, receiver polls)
 ///
-/// Overwrite detection is size-dependent:
-/// - `size_of::<T>() <= 8`: slots are bare `T` (naturally atomic, no tearing).
-///   A torn/stale read requires the sender to lap the receiver, which the
-///   `w_top` pre/post bracket in the receiver catches.
-/// - `size_of::<T>() > 8`: slots are `Slot<T>` with per-slot seqlock counters.
-///   The seqlock gives a proper release/acquire edge per slot, so concurrent
-///   and lapping writes are detected without relying on `w_top` store ordering.
-///
-/// The path is selected at compile time via `const { size_of::<T>() <= 8 }`.
+/// Overwrite detection depends on `size_of::<T>()`, picked at compile time:
+/// - `<= 8`: slots are bare `T`. Reads can't tear; a stale read needs the sender
+///   to lap the receiver, and the `w_top` pre/post bracket catches that.
+/// - `> 8`: slots are `Slot<T>` with seqlock counters, giving a release/acquire
+///   edge per slot so lapping writes are caught without leaning on `w_top`.
 #[repr(C, align(64))]
 pub struct RingBuf<T: Copy> {
     data_ptr: *mut u8,

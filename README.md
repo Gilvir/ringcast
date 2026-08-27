@@ -1,8 +1,8 @@
 # ringcast
 
-A lock-free SPMC (single-producer, multiple-consumer) broadcast ring buffer for Rust. Built for the kind of work where nanoseconds actually matter — market data distribution, real-time telemetry, that sort of thing.
+A lock-free SPMC (single-producer, multiple-consumer) broadcast ring buffer for Rust. Aimed at low-latency work like market data distribution and real-time telemetry.
 
-The sender never blocks and always overwrites the oldest slot when the buffer is full. Every receiver independently reads all messages. If a receiver falls behind, it detects the overrun and snaps forward to the oldest available data instead of silently reading garbage.
+The sender never blocks and overwrites the oldest slot when the buffer is full. Every receiver independently reads all messages. If a receiver falls behind, it detects the overrun and jumps forward to the oldest available data instead of returning garbage.
 
 ## Quick start
 
@@ -33,15 +33,15 @@ match rx.try_recv() {
 - **Overwrite-on-full** — no backpressure, no blocking the sender. Slow consumers get an `Overrun` error with a count of lost items and are repositioned automatically.
 - **Lock-free** — the entire hot path is atomic loads and stores. No mutexes, no `lock` prefixed instructions on x86. The only ordering constraint is a single `Release`/`Acquire` pair on the read-top counter.
 - **Works with any `Copy` type** — overwrite detection uses the w_top pre/post bracket, which catches overwrites for all type sizes with no per-slot overhead.
-- **Huge page allocation** — on Linux, the backing buffer uses 2MB huge pages by default (falls back to `mmap` with `MAP_POPULATE`, or to the system allocator on non-Linux platforms). Keeps TLB misses off the hot path.
+- **Huge page allocation** — on Linux, the backing buffer uses 2MB huge pages by default (falls back to `mmap` with `MAP_POPULATE`, or to the system allocator on non-Linux platforms) to reduce TLB misses.
 - **Batch operations** — `send_batch` / `try_recv_batch` / `recv_batch` amortize the atomic publish across N items.
 - **Optional `mimalloc` feature** — enable the `mimalloc` Cargo feature to set `mimalloc` as the process's global allocator. Off by default so the library doesn't impose an allocator choice on consumers.
 
 ## Constraints
 
-- `T: Copy` is required. No types with destructors — this is fundamental to the lock-free design, not a limitation we plan to lift.
+- `T: Copy` is required. No types with destructors, since overwrite-on-full has nowhere to run them.
 - Capacity is fixed at creation time.
-- Receivers spin-wait by default (tiered: immediate retry, then `pause`/`yield` instructions). This is intentional — the target use case is dedicated cores, not shared threadpools.
+- Receivers spin-wait by default (tiered: immediate retry, then `pause`/`yield`). It's built for dedicated cores, not shared threadpools.
 
 ## Benchmarks
 
@@ -66,7 +66,7 @@ How fast is a `send()` immediately followed by `try_recv()` on the same thread. 
 
 ### Empty try_recv (miss)
 
-How fast does `try_recv()` return when there's nothing to read. Matters a lot if you're spinning.
+How fast does `try_recv()` return when there's nothing to read. Relevant if you're spinning on it.
 
 | Library | Latency |
 |---|---|
@@ -111,11 +111,11 @@ Same test, but ringcast uses `send_batch()` with 16-element slices. The others d
 | crossbeam | 163 us | ~61M msgs/s |
 | flume | 478 us | ~21M msgs/s |
 
-The batch path amortizes the atomic publish — one `Release` store per batch instead of per item. This is where ringcast really shines.
+The batch path amortizes the atomic publish: one `Release` store per batch instead of per item.
 
 ### Broadcast fanout throughput (10k messages)
 
-This is ringcast's actual use case: one sender, multiple receivers, all seeing every message. crossbeam and flume don't have native broadcast, so they're simulated with N separate channels (the sender loops and sends to each one). rtrb is SPSC-only so it's excluded.
+The actual use case: one sender, multiple receivers, all seeing every message. crossbeam and flume don't have native broadcast, so they're simulated with N separate channels (the sender loops and sends to each one). rtrb is SPSC-only so it's excluded.
 
 | Receivers | ringcast | bus | crossbeam (sim) | flume (sim) |
 |---|---|---|---|---|
@@ -124,13 +124,13 @@ This is ringcast's actual use case: one sender, multiple receivers, all seeing e
 | 4 | **622 us** | 1.47 ms | 1.49 ms | 3.98 ms |
 | 8 | **881 us** | 1.73 ms | 2.62 ms | 8.40 ms |
 
-ringcast scales well because receivers share no mutable state with each other — they each just read a shared counter and their own local position. At 8 receivers, it's roughly 2x faster than bus and 3x faster than simulated crossbeam.
+Receivers share no mutable state with each other; each one reads a shared counter and its own local position. At 8 receivers it's roughly 2x bus and 3x simulated crossbeam.
 
 ### Disclaimer
 
-These benchmarks were run on a single machine (WSL2, no core isolation, no `isolcpus`, no huge pages pre-allocated, stock CPU governor). They show relative performance between libraries under the same conditions, but **the absolute numbers will differ on your hardware**. For production latency work, you'd want isolated cores, pinned threads, huge pages via `hugetlbfs`, disabled hyper-threading, and disabled turbo boost. See the design doc for details on proper benchmarking methodology.
+These benchmarks were run on a single machine (WSL2, no core isolation, no `isolcpus`, no huge pages pre-allocated, stock CPU governor). They show relative performance between libraries under the same conditions, but the absolute numbers will differ on your hardware. For production latency work you'd want isolated cores, pinned threads, huge pages via `hugetlbfs`, and hyper-threading and turbo boost disabled.
 
-Take benchmark numbers from any library (including this one) with a grain of salt. Run them yourself on your target hardware.
+Run the benchmarks yourself on your target hardware before trusting any of these numbers, mine included.
 
 ## API
 
